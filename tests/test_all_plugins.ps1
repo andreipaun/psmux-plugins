@@ -50,7 +50,7 @@ Write-Host "`n--- Phase 1: Static Analysis of plugin.conf files ---" -Foreground
 
 $plugins = @(
     'psmux-sensible', 'psmux-pain-control',
-    'psmux-resurrect', 'psmux-continuum', 'psmux-prefix-highlight',
+    'psmux-resurrect', 'psmux-continuum', 'psmux-assistant-resurrect', 'psmux-prefix-highlight',
     'psmux-battery', 'psmux-cpu', 'psmux-logging', 'psmux-sidebar'
 )
 $themes = @(
@@ -125,6 +125,7 @@ foreach ($plugin in ($plugins + $themes)) {
 Write-Host "`n--- Phase 1c: Check referenced scripts ---" -ForegroundColor Yellow
 $scriptChecks = @{
     'psmux-resurrect' = @('scripts/save.ps1', 'scripts/restore.ps1')
+    'psmux-assistant-resurrect' = @('scripts/lib-detect.ps1', 'scripts/save-assistant-sessions.ps1', 'scripts/restore-assistant-sessions.ps1', 'hooks/claude-session-track.ps1', 'hooks/claude-session-cleanup.ps1')
     'psmux-continuum' = @('scripts/auto_save.ps1', 'scripts/auto_restore.ps1', 'scripts/boot.ps1')
     'psmux-battery' = @('scripts/battery_status.ps1', 'scripts/battery_info.ps1')
     'psmux-cpu' = @('scripts/system_stats.ps1', 'scripts/cpu_info.ps1')

@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 # =============================================================================
 # psmux-resurrect Plugin: Comprehensive E2E Test
 # Tests save and restore functionality across multiple scenarios
@@ -34,6 +34,11 @@ if (-not $PSMUX) {
 $PLUGIN_ROOT = Split-Path $PSScriptRoot -Parent
 $SAVE_SCRIPT = Join-Path $PLUGIN_ROOT 'psmux-resurrect\scripts\save.ps1'
 $RESTORE_SCRIPT = Join-Path $PLUGIN_ROOT 'psmux-resurrect\scripts\restore.ps1'
+
+# Resolve the PowerShell host: pwsh when installed, otherwise Windows
+# PowerShell 5.1 (the scripts are 5.1-compatible).
+$PSH = 'powershell'
+if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { $PSH = 'pwsh' }
 $RESURRECT_DIR = Join-Path $env:USERPROFILE '.psmux\resurrect'
 
 Write-Host "`n=== psmux-resurrect Comprehensive Test ===" -ForegroundColor Magenta
@@ -139,7 +144,7 @@ Check "beta:0 has 3 panes" ($beta_panes.Count -eq 3) "Found: $($beta_panes.Count
 # =============================================================================
 Write-Host "`n--- Phase 4: Save Environment ---" -ForegroundColor Yellow
 
-$saveOutput = pwsh -NoProfile -ExecutionPolicy Bypass -File $SAVE_SCRIPT 2>&1 | Out-String
+$saveOutput = & $PSH -NoProfile -ExecutionPolicy Bypass -File $SAVE_SCRIPT 2>&1 | Out-String
 Check "save script succeeded" ($saveOutput -match 'Saved to') $saveOutput.Trim()
 
 # Verify save file
@@ -206,7 +211,7 @@ $remainingTest = $afterKill | Where-Object { $_ -match '^res_test_' }
 Check "all test sessions killed" ($remainingTest.Count -eq 0) "Remaining: $($remainingTest.Count)"
 
 # Now restore
-$restoreOutput = pwsh -NoProfile -ExecutionPolicy Bypass -File $RESTORE_SCRIPT 2>&1 | Out-String
+$restoreOutput = & $PSH -NoProfile -ExecutionPolicy Bypass -File $RESTORE_SCRIPT 2>&1 | Out-String
 Check "restore script succeeded" ($restoreOutput -match 'Restored session')
 
 # Wait for sessions to spin up
@@ -270,7 +275,7 @@ Check "gamma:0 restored with 1 pane" ($rGammaPanes.Count -eq 1)
 # =============================================================================
 Write-Host "`n--- Phase 7: Idempotency Test ---" -ForegroundColor Yellow
 
-$restoreAgain = pwsh -NoProfile -ExecutionPolicy Bypass -File $RESTORE_SCRIPT 2>&1 | Out-String
+$restoreAgain = & $PSH -NoProfile -ExecutionPolicy Bypass -File $RESTORE_SCRIPT 2>&1 | Out-String
 $skipped = ($restoreAgain | Select-String 'already exists').Matches.Count
 Check "restore skips existing sessions" ($restoreAgain -match 'already exists')
 
@@ -319,7 +324,7 @@ set -g @resurrect-capture-pane-contents on
 set -g @resurrect-dir '$RESURRECT_DIR'
 
 # Source the plugin via run-shell
-run-shell 'pwsh -NoProfile -ExecutionPolicy Bypass -File "$($SAVE_SCRIPT -replace '\\','/')"' 
+run-shell '$PSH -NoProfile -ExecutionPolicy Bypass -File "$($SAVE_SCRIPT -replace '\\','/')"' 
 "@
 Set-Content -Path $testConf -Value $confContent -Force
 
@@ -360,3 +365,4 @@ if ($fail -gt 0) {
     Write-Host "All tests passed!" -ForegroundColor Green
     exit 0
 }
+
