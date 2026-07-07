@@ -22,6 +22,26 @@ function Get-PsmuxBin {
 
 $PSMUX = Get-PsmuxBin
 
+# Run a user-configured hook command (tmux-resurrect compatible options
+# @resurrect-hook-post-save-all / @resurrect-hook-post-restore-all).
+# The option holds a command string; the save file path is appended as a
+# single quoted argument. Hook failures never fail the main operation.
+function Invoke-ResurrectHook {
+    param([string]$OptionName, [string]$FilePath)
+    $hookCmd = ''
+    try {
+        $hookCmd = (& $PSMUX show-options -gv $OptionName 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { return }
+    } catch { return }
+    if (-not $hookCmd -or $hookCmd -match 'unknown option|invalid option|error|no server|not found|refused') { return }
+    $quotedPath = "'" + ($FilePath -replace "'", "''") + "'"
+    try {
+        Invoke-Expression "$hookCmd $quotedPath" 2>&1 | Out-Null
+    } catch {
+        Write-Host "psmux-resurrect: hook $OptionName failed: $_" -ForegroundColor Yellow
+    }
+}
+
 # --- Progress indicator helpers ---
 # A persistent message is exposed via the @resurrect-status user option so
 # users can render it in status-right with #{@resurrect-status}. We also
@@ -290,6 +310,10 @@ try {
     Set-ResurrectStatus $summary
     & $PSMUX display-message -d $SUMMARY_TOAST_MS $summary 2>&1 | Out-Null
     & $PSMUX refresh-client -S 2>&1 | Out-Null
+
+    # Fire the post-restore hook with the save file that was just restored,
+    # before the summary linger so hook consumers start promptly.
+    Invoke-ResurrectHook '@resurrect-hook-post-restore-all' $saveFile
 
     # Keep the persistent status visible for the same window as the toast, then clear
     Start-Sleep -Milliseconds $SUMMARY_TOAST_MS

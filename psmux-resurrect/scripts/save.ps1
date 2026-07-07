@@ -14,6 +14,26 @@ function Get-PsmuxBin {
 
 $PSMUX = Get-PsmuxBin
 
+# Run a user-configured hook command (tmux-resurrect compatible options
+# @resurrect-hook-post-save-all / @resurrect-hook-post-restore-all).
+# The option holds a command string; the save file path is appended as a
+# single quoted argument. Hook failures never fail the main operation.
+function Invoke-ResurrectHook {
+    param([string]$OptionName, [string]$FilePath)
+    $hookCmd = ''
+    try {
+        $hookCmd = (& $PSMUX show-options -gv $OptionName 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { return }
+    } catch { return }
+    if (-not $hookCmd -or $hookCmd -match 'unknown option|invalid option|error|no server|not found|refused') { return }
+    $quotedPath = "'" + ($FilePath -replace "'", "''") + "'"
+    try {
+        Invoke-Expression "$hookCmd $quotedPath" 2>&1 | Out-Null
+    } catch {
+        Write-Host "psmux-resurrect: hook $OptionName failed: $_" -ForegroundColor Yellow
+    }
+}
+
 # Resolve save directory (support @resurrect-dir option)
 $RESURRECT_DIR = Join-Path $env:USERPROFILE '.psmux\resurrect'
 try {
@@ -192,4 +212,16 @@ if ($shouldWrite) {
     # No changes, skip writing a duplicate
     & $PSMUX display-message "Environment unchanged, skipping save." 2>&1 | Out-Null
     Write-Host "psmux-resurrect: No changes detected, skipped." -ForegroundColor DarkGray
+}
+
+# Fire the post-save hook with the current save file path. This runs even
+# when the layout was unchanged (dedup skip): hook consumers may track state
+# the fingerprint doesn't cover (e.g. process session IDs inside panes).
+$currentSave = ''
+if (Test-Path $lastFile) {
+    $currentSave = (Get-Content $lastFile -Raw -ErrorAction SilentlyContinue)
+    if ($currentSave) { $currentSave = $currentSave.Trim() }
+}
+if ($currentSave) {
+    Invoke-ResurrectHook '@resurrect-hook-post-save-all' $currentSave
 }

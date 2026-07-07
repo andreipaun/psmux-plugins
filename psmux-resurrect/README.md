@@ -62,6 +62,12 @@ set -g @resurrect-processes ':all:'
 
 # Use tilde for fuzzy matching (restore if command contains the string)
 set -g @resurrect-processes '"~rails server" "~npm start"'
+
+# Hooks (tmux-resurrect compatible): a command string executed after each
+# save / restore, with the save file path appended as a quoted argument.
+# Used by plugins such as psmux-assistant-resurrect.
+set -g @resurrect-hook-post-save-all 'powershell -NoProfile -File "C:/path/to/post-save.ps1"'
+set -g @resurrect-hook-post-restore-all 'powershell -NoProfile -File "C:/path/to/post-restore.ps1"'
 ```
 
 ## Restore Progress Indicator
