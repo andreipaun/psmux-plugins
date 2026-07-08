@@ -14,10 +14,30 @@ relaunched with the conversation resumed instead of an empty prompt.
 |------|-----------|-------------------|----------------|
 | Claude Code (`claude`) | process tree | SessionStart hook state file, `--resume` args fallback | `claude --resume <id>` |
 | Codex CLI (`codex`) | process tree | `~/.codex/session-tags.jsonl` PID match, `resume` args, rollout cwd match | `codex resume <id>` |
+| OpenCode (`opencode`) | process tree | plugin-written state file, `-s`/`--session` args fallback | `opencode -s <id>` |
+| Pi (`pi`) | process tree | `--session` args, else best-scoring JSONL under `~/.pi/agent/sessions/` | `pi --session <id>` |
+| Oh My Pi (`omp`) | process tree | `--resume`/`-r`/`--session` args, terminal breadcrumb file, else best-scoring JSONL under `~/.omp/agent/sessions/` | `omp --resume <id>` |
+| Grok CLI (`grok`) | process tree | `~/.grok/active_sessions.json` PID match, `--resume`/`-r`/`-s`/`--session` args fallback | `grok --resume <id>` |
 
-Both native binaries (`claude.exe`, `codex.exe`) and npm installs running
-under `node` are detected. Codex support follows the upstream extraction spec
-and has not yet been exercised against a live Codex install on Windows.
+Native binaries (`claude.exe`, `codex.exe`, `opencode.exe`, `pi.exe`,
+`omp.exe`, `grok.exe`) and npm/bun installs running under `node.exe`/`bun.exe`
+are both detected.
+
+**Unverified against a live install**: Codex, OpenCode, Pi, Oh My Pi, and Grok
+are all built to their upstream extraction spec and covered by unit tests
+against synthetic data, but none of these five CLIs is installed on the
+machine this port was developed on. Only Claude Code has been exercised
+end-to-end (start → save → kill → restore → resume, with a real
+conversation). Reports of what works (or doesn't) against a live install of
+any of the other five are welcome.
+
+**Grok caveat**: xAI's official Grok CLI is Mac/Linux-only, so whatever runs
+on Windows is a community fork, and forks disagree on the resume flag
+(`-r`/`--resume` vs `-s`/`--session`). Both conventions are accepted when
+parsing a live command line, but the resume command this plugin sends
+(`grok --resume <id>`) is a best guess - if your fork uses a different flag,
+the retyped command may need adjusting by hand until this is verified against
+a specific package.
 
 ## Requirements
 
@@ -41,7 +61,10 @@ Then press `Prefix + I` (ppm install). On first load the plugin:
 2. installs SessionStart/SessionEnd hooks into `~/.claude/settings.json`
    (idempotent; a one-time backup is written to
    `settings.json.assistant-resurrect.bak`);
-3. creates the state directory `~/.psmux/assistant-resurrect/state/`.
+3. installs the OpenCode session-tracking plugin into
+   `~/.config/opencode/plugins/opencode-session-track.js` (idempotent file
+   copy - only written when missing or changed);
+4. creates the state directory `~/.psmux/assistant-resurrect/state/`.
 
 ## Usage
 
@@ -65,9 +88,12 @@ The state directory can be overridden with the
 
 **Save** (post-save hook): one `Win32_Process` snapshot, a breadth-first walk
 from each pane's root PID to find assistant processes, then per-tool session
-ID extraction — Claude reads the state file its SessionStart hook wrote
-(`claude-<pid>.json`), Codex matches its PID in `session-tags.jsonl`. Results
-are written to `assistant-sessions.json` alongside the resurrect saves.
+ID extraction — Claude and OpenCode read the state file their session hooks
+wrote (`claude-<pid>.json` / `opencode-<pid>.json`), Codex and Grok match
+their PID in a JSON(L) registry, Pi and Oh My Pi score candidate JSONL
+session files under a directory keyed by the pane's working directory.
+Results are written to `assistant-sessions.json` alongside the resurrect
+saves.
 
 **Restore** (post-restore hook): for every recorded pane that exists again,
 sits at a shell prompt, and doesn't already run an assistant, the resume

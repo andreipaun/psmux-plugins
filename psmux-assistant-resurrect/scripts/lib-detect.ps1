@@ -39,6 +39,28 @@ function Get-CodexHome {
     return (Join-Path $env:USERPROFILE '.codex')
 }
 
+# OpenCode's session-tracking plugin (hooks/opencode-session-track.js) writes
+# into the SAME shared state dir Claude's SessionStart hook uses - just a
+# different file prefix (opencode-<pid>.json vs claude-<pid>.json).
+function Get-OpenCodeStateDir {
+    return (Get-AssistantStateDir)
+}
+
+function Get-PiHome {
+    if ($env:PI_HOME) { return $env:PI_HOME }
+    return (Join-Path $env:USERPROFILE '.pi')
+}
+
+function Get-OmpHome {
+    if ($env:OMP_HOME) { return $env:OMP_HOME }
+    return (Join-Path $env:USERPROFILE '.omp')
+}
+
+function Get-GrokHome {
+    if ($env:GROK_HOME) { return $env:GROK_HOME }
+    return (Join-Path $env:USERPROFILE '.grok')
+}
+
 # One snapshot of all processes: ProcId, ParentProcId, Name, CommandLine,
 # StartTime. Taken once per save/restore run (upstream: single `ps -eo` pass).
 function Get-ProcessSnapshot {
@@ -88,19 +110,28 @@ function Get-PaneDescendants {
 }
 
 # Map a process to an assistant tool name, or $null.
-# Matches native binaries (claude.exe, codex.exe) and npm-installed variants
-# running under node whose command line references the tool's CLI script.
+# Matches native binaries (claude.exe, codex.exe, opencode.exe, pi.exe,
+# omp.exe, grok.exe) and npm/bun-installed variants running under node.exe or
+# bun.exe whose command line references the tool's CLI entry script.
 function Get-ToolFromProcess {
     param($Proc)
 
     $base = ([string]$Proc.Name) -replace '\.exe$',''
     $base = $base.ToLower()
-    if ($base -eq 'claude') { return 'claude' }
-    if ($base -eq 'codex')  { return 'codex' }
-    if ($base -eq 'node') {
+    if ($base -eq 'claude')   { return 'claude' }
+    if ($base -eq 'codex')    { return 'codex' }
+    if ($base -eq 'opencode') { return 'opencode' }
+    if ($base -eq 'pi')       { return 'pi' }
+    if ($base -eq 'omp')      { return 'omp' }
+    if ($base -eq 'grok')     { return 'grok' }
+    if ($base -eq 'node' -or $base -eq 'bun') {
         $cl = [string]$Proc.CommandLine
         if ($cl -match '(?i)[\\/](@anthropic-ai[\\/]claude-code|claude-code|claude)[\\/][^\s"]*\.[mc]?js') { return 'claude' }
         if ($cl -match '(?i)[\\/](@openai[\\/]codex|codex)[\\/][^\s"]*\.[mc]?js') { return 'codex' }
+        if ($cl -match '(?i)[\\/](opencode-ai|opencode)[\\/][^\s"]*\.[mc]?js') { return 'opencode' }
+        if ($cl -match '(?i)[\\/](@earendil-works[\\/]pi-coding-agent|pi-coding-agent)[\\/][^\s"]*\.[mc]?js') { return 'pi' }
+        if ($cl -match '(?i)[\\/]oh-my-pi[\\/][^\s"]*\.[mc]?js') { return 'omp' }
+        if ($cl -match '(?i)[\\/]grok-cli[\\/][^\s"]*\.[mc]?js') { return 'grok' }
     }
     return $null
 }
@@ -146,8 +177,13 @@ function Split-CommandLine {
 
 # Parse a resume/session id out of a live command line (fallback when no
 # state file exists - e.g. right after a restore, before hooks fire).
-#   claude: --resume <id> or --resume=<id>
-#   codex:  resume <id>
+#   claude:   --resume <id> or --resume=<id>
+#   codex:    resume <id>
+#   opencode: -s <id> or --session <id>
+#   pi:       --session <id>
+#   omp:      --resume/-r/--session <id>
+#   grok:     --resume/-r/-s/--session <id> (community forks disagree on the
+#             flag; both conventions are accepted - see README caveat)
 function Get-ResumeIdFromArgs {
     param([string]$Tool, [string]$CommandLine)
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
@@ -158,6 +194,22 @@ function Get-ResumeIdFromArgs {
     }
     elseif ($Tool -eq 'codex') {
         $m = [regex]::Match($CommandLine, '(?:^|\s)resume\s+([A-Za-z0-9_-]+)')
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    elseif ($Tool -eq 'opencode') {
+        $m = [regex]::Match($CommandLine, '(?:-s|--session)[=\s]\s*([A-Za-z0-9_-]+)')
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    elseif ($Tool -eq 'pi') {
+        $m = [regex]::Match($CommandLine, '--session[=\s]\s*([A-Za-z0-9_-]+)')
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    elseif ($Tool -eq 'omp') {
+        $m = [regex]::Match($CommandLine, '(?:--resume|--session|-r)[=\s]\s*([A-Za-z0-9_-]+)')
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    elseif ($Tool -eq 'grok') {
+        $m = [regex]::Match($CommandLine, '(?:--resume|--session|-r|-s)[=\s]\s*([A-Za-z0-9_-]+)')
         if ($m.Success) { return $m.Groups[1].Value }
     }
     return $null
@@ -173,8 +225,12 @@ function Get-ModelFromArgs {
 
 # Remaining CLI args after dropping the executable, session-selection flags
 # and --model (stored separately). Mirrors upstream's stripped flag lists:
-#   claude: --resume --continue --session-id --fork-session --from-pr
-#   codex:  resume/fork subcommands, --last --all --include-non-interactive
+#   claude:   --resume --continue --session-id --fork-session --from-pr
+#   codex:    resume/fork subcommands, --last --all --include-non-interactive
+#   opencode: -s/--session, --continue/-c, --fork
+#   pi:       --session
+#   omp:      --resume/-r/--session, --session-dir, --cwd
+#   grok:     --resume/-r/-s/--session
 function Get-CliArgsRemainder {
     param([string]$Tool, [string]$CommandLine)
 
@@ -191,6 +247,15 @@ function Get-CliArgsRemainder {
     } elseif ($Tool -eq 'codex') {
         $subcommands += @('resume', 'fork')
         $boolFlags += @('--last', '--all', '--include-non-interactive')
+    } elseif ($Tool -eq 'opencode') {
+        $valueFlags += @('-s', '--session')
+        $boolFlags += @('--continue', '-c', '--fork')
+    } elseif ($Tool -eq 'pi') {
+        $valueFlags += @('--session')
+    } elseif ($Tool -eq 'omp') {
+        $valueFlags += @('--resume', '-r', '--session', '--session-dir', '--cwd')
+    } elseif ($Tool -eq 'grok') {
+        $valueFlags += @('--resume', '-r', '-s', '--session')
     }
 
     $kept = @()
@@ -356,28 +421,225 @@ function Get-CodexSessionInfo {
 }
 
 # --- Pane enumeration --------------------------------------------------------
-# All panes across all sessions: Target (sess:win.pane), PanePid, Cwd, Command.
+# All panes across all sessions: Target (sess:win.pane), PanePid, Cwd, Command,
+# PaneId (tmux-style unique id, e.g. "%3" - used for OMP's terminal breadcrumb).
 function Get-PaneList {
     param([string]$PsmuxBin)
 
     $panes = @()
-    $fmt = '#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_current_path}|#{pane_current_command}'
+    $fmt = '#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_current_path}|#{pane_current_command}|#{pane_id}'
     $raw = (& $PsmuxBin list-panes -a -F $fmt 2>&1) | Out-String
     foreach ($line in ($raw -split "`n")) {
         $line = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $parts = $line -split '\|', 6
+        $parts = $line -split '\|', 7
         if ($parts.Count -lt 5) { continue }
         $panePid = 0
         if (-not [int]::TryParse($parts[3], [ref]$panePid)) { continue }
         $cmd = ''
         if ($parts.Count -ge 6) { $cmd = $parts[5] }
+        $paneId = ''
+        if ($parts.Count -ge 7) { $paneId = $parts[6] }
         $panes += [PSCustomObject]@{
             Target  = "$($parts[0]):$($parts[1]).$($parts[2])"
             PanePid = $panePid
             Cwd     = $parts[4]
             Command = $cmd
+            PaneId  = $paneId
         }
     }
     return $panes
+}
+
+# --- Generic JSONL-session picker --------------------------------------------
+# Port of upstream's Python select_jsonl_session_id, used by Pi and OMP: given
+# a directory of per-session JSONL files (named "<id>.jsonl" or
+# "session-<id>.jsonl"), pick the best match by:
+#   (a) an already-known session id (highest priority - exact match wins)
+#   (b) most recently modified (proxy for "actively resumed")
+#   (c) file creation time closest to the assistant process's start time
+# (Cwd/path distance is handled by the caller choosing which per-cwd directory
+# to scan in the first place - Pi/OMP encode the cwd into the directory name.)
+function Get-JsonlSessionByScore {
+    param([string]$SessionsDir, $StartTime, [string]$KnownSessionId = $null)
+
+    if (-not $SessionsDir -or -not (Test-Path $SessionsDir)) { return $null }
+    $files = @(Get-ChildItem $SessionsDir -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) { return $null }
+
+    $best = $null
+    $bestScore = [double]::MinValue
+    foreach ($f in $files) {
+        $id = $f.BaseName -replace '^session-', ''
+        if (-not $id) { continue }
+
+        $score = [double]($f.LastWriteTime.Ticks) / 1e9   # recency, dominant term
+        if ($StartTime) {
+            $diffMinutes = [Math]::Abs(($f.CreationTime - $StartTime).TotalMinutes)
+            $score -= $diffMinutes                          # closer to process start is better
+        }
+        if ($KnownSessionId -and $id -eq $KnownSessionId) { $score += 1e12 }  # exact match always wins
+
+        if ($score -gt $bestScore) { $bestScore = $score; $best = $id }
+    }
+    return $best
+}
+
+# --- OpenCode session info ----------------------------------------------------
+# Primary: state file written by the opencode-session-track.js plugin
+# (opencode-<pid>.json, in the same shared state dir as Claude's).
+# Fallback: -s/--session id parsed from the live command line.
+function Get-OpenCodeSessionInfo {
+    param([int]$ProcId, [string]$StateDir, [string]$CommandLine)
+
+    $info = @{ SessionId = $null; Model = $null; Env = $null; Source = $null }
+
+    $stateFile = Join-Path $StateDir "opencode-$ProcId.json"
+    if (Test-Path $stateFile) {
+        try {
+            $state = Get-Content $stateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($state.session_id) {
+                $info.SessionId = [string]$state.session_id
+                $info.Source = 'state-file'
+                if ($state.model) { $info.Model = [string]$state.model }
+            }
+        } catch { }
+    }
+
+    if (-not $info.SessionId) {
+        $argId = Get-ResumeIdFromArgs -Tool 'opencode' -CommandLine $CommandLine
+        if ($argId) {
+            $info.SessionId = $argId
+            $info.Source = 'args'
+        }
+    }
+
+    if ($info.SessionId -and -not $info.Model) {
+        $info.Model = Get-ModelFromArgs -CommandLine $CommandLine
+    }
+    return $info
+}
+
+# --- Pi session info -----------------------------------------------------------
+# Primary: --session id parsed from the live command line.
+# Fallback: best-scoring JSONL file under <pi-home>\agent\sessions\--<cwd>--
+# (upstream sanitizes the cwd by replacing path separators/colons with '-').
+function Get-PiSessionInfo {
+    param([int]$ProcId, [string]$PiHome, [string]$CommandLine, [string]$Cwd, $StartTime)
+
+    $info = @{ SessionId = $null; Model = $null; Env = $null; Source = $null }
+
+    $argId = Get-ResumeIdFromArgs -Tool 'pi' -CommandLine $CommandLine
+    if ($argId) {
+        $info.SessionId = $argId
+        $info.Source = 'args'
+    }
+
+    if (-not $info.SessionId -and $Cwd) {
+        $encoded = '--' + ($Cwd -replace '[\\/:]', '-') + '--'
+        $sessDir = Join-Path $PiHome "agent\sessions\$encoded"
+        $id = Get-JsonlSessionByScore -SessionsDir $sessDir -StartTime $StartTime
+        if ($id) {
+            $info.SessionId = $id
+            $info.Source = 'jsonl'
+        }
+    }
+
+    if ($info.SessionId -and -not $info.Model) {
+        $info.Model = Get-ModelFromArgs -CommandLine $CommandLine
+    }
+    return $info
+}
+
+# --- Oh My Pi (omp) session info ----------------------------------------------
+# Primary: --resume/-r/--session id parsed from the live command line.
+# Fallback 1: terminal breadcrumb file at
+#             <omp-home>\agent\terminal-sessions\tmux-<pane_id> (two lines:
+#             cwd, session-file path). OMP's own terminal-id logic falls back
+#             to TMUX_PANE on non-POSIX platforms - psmux already exports
+#             that, so the key is deterministic on Windows.
+# Fallback 2: best-scoring JSONL file under <omp-home>\agent\sessions\<cwd>.
+function Get-OmpSessionInfo {
+    param([int]$ProcId, [string]$OmpHome, [string]$CommandLine, [string]$Cwd, $StartTime, [string]$PaneId = '')
+
+    $info = @{ SessionId = $null; Model = $null; Env = $null; Source = $null }
+
+    $argId = Get-ResumeIdFromArgs -Tool 'omp' -CommandLine $CommandLine
+    if ($argId) {
+        $info.SessionId = $argId
+        $info.Source = 'args'
+    }
+
+    if (-not $info.SessionId -and $PaneId) {
+        $breadcrumb = Join-Path $OmpHome "agent\terminal-sessions\tmux-$PaneId"
+        if (Test-Path $breadcrumb) {
+            try {
+                $lines = @(Get-Content $breadcrumb -ErrorAction Stop)
+                if ($lines.Count -ge 2) {
+                    $sessFile = $lines[1].Trim()
+                    if ($sessFile -and (Test-Path $sessFile)) {
+                        $id = ([System.IO.Path]::GetFileNameWithoutExtension($sessFile)) -replace '^session-', ''
+                        if ($id) {
+                            $info.SessionId = $id
+                            $info.Source = 'breadcrumb'
+                        }
+                    }
+                }
+            } catch { }
+        }
+    }
+
+    if (-not $info.SessionId -and $Cwd) {
+        $encoded = $Cwd -replace '[\\/:]', '-'
+        $sessDir = Join-Path $OmpHome "agent\sessions\$encoded"
+        $id = Get-JsonlSessionByScore -SessionsDir $sessDir -StartTime $StartTime
+        if ($id) {
+            $info.SessionId = $id
+            $info.Source = 'jsonl'
+        }
+    }
+
+    if ($info.SessionId -and -not $info.Model) {
+        $info.Model = Get-ModelFromArgs -CommandLine $CommandLine
+    }
+    return $info
+}
+
+# --- Grok session info ---------------------------------------------------------
+# Primary: PID match in <grok-home>\active_sessions.json (a JSON array of
+# {session_id, pid, cwd, opened_at} records).
+# Fallback: --resume/-r/-s/--session id parsed from the live command line.
+# NOTE: xAI's official Grok CLI is Mac/Linux-only; whatever runs on Windows is
+# a community fork, and forks disagree on the flag convention - both -r/--resume
+# and -s/--session are accepted. See README for this caveat.
+function Get-GrokSessionInfo {
+    param([int]$ProcId, [string]$GrokHome, [string]$CommandLine)
+
+    $info = @{ SessionId = $null; Model = $null; Env = $null; Source = $null }
+
+    $regFile = Join-Path $GrokHome 'active_sessions.json'
+    if (Test-Path $regFile) {
+        try {
+            $arr = Get-Content $regFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            foreach ($rec in @($arr)) {
+                if ($rec.pid -and [int]$rec.pid -eq $ProcId -and $rec.session_id) {
+                    $info.SessionId = [string]$rec.session_id  # last match wins
+                }
+            }
+            if ($info.SessionId) { $info.Source = 'active-sessions' }
+        } catch { }
+    }
+
+    if (-not $info.SessionId) {
+        $argId = Get-ResumeIdFromArgs -Tool 'grok' -CommandLine $CommandLine
+        if ($argId) {
+            $info.SessionId = $argId
+            $info.Source = 'args'
+        }
+    }
+
+    if ($info.SessionId -and -not $info.Model) {
+        $info.Model = Get-ModelFromArgs -CommandLine $CommandLine
+    }
+    return $info
 }

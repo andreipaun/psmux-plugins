@@ -4,7 +4,8 @@
 # =============================================================================
 # Invoked by psmux-resurrect's @resurrect-hook-post-restore-all after the
 # session layout is rebuilt. Reads assistant-sessions.json and sends each
-# recorded pane its resume command (claude --resume <id> / codex resume <id>).
+# recorded pane its resume command (claude --resume <id> / codex resume <id> /
+# opencode -s <id> / pi --session <id> / omp --resume <id> / grok --resume <id>).
 #
 # All inputs are injectable for tests; defaults hit the live system.
 # Windows PowerShell 5.1 compatible.
@@ -179,6 +180,23 @@ foreach ($entry in @($doc.sessions)) {
         }
         'codex' {
             $cmd = "codex resume $sessionId"
+        }
+        'opencode' {
+            $cmd = "opencode -s $sessionId"
+            $cliArgs = [string]$entry.cli_args
+            if ($cliArgs) { $cmd += " $cliArgs" }
+        }
+        'pi' {
+            $cmd = "pi --session $sessionId"
+        }
+        'omp' {
+            $cmd = "omp --resume $sessionId"
+        }
+        'grok' {
+            # Community fork flag convention, unverified against a specific
+            # package - see README caveat. Upstream deliberately ignores
+            # captured cli_args here to avoid re-submitting a stale prompt.
+            $cmd = "grok --resume $sessionId"
         }
         default {
             Write-Host "assistant-resurrect: unknown tool '$tool' for $target, skipping" -ForegroundColor Yellow

@@ -42,7 +42,8 @@ $expectedFiles = @(
     'psmux-assistant-resurrect.ps1', 'plugin.conf', 'README.md',
     'scripts\lib-detect.ps1', 'scripts\save-assistant-sessions.ps1',
     'scripts\restore-assistant-sessions.ps1',
-    'hooks\claude-session-track.ps1', 'hooks\claude-session-cleanup.ps1'
+    'hooks\claude-session-track.ps1', 'hooks\claude-session-cleanup.ps1',
+    'hooks\opencode-session-track.js'
 )
 foreach ($f in $expectedFiles) {
     Check "file exists: $f" (Test-Path (Join-Path $PluginDir $f))
@@ -143,6 +144,48 @@ Check "cli_args: claude boolean session flags stripped" ($rem -eq '--debug') $re
 $rem = Get-CliArgsRemainder -Tool 'codex' -CommandLine 'codex resume xyz-9 --last --sandbox on'
 Check "cli_args: codex subcommand and flags stripped" ($rem -eq '--sandbox on') $rem
 
+# --- Detection: OpenCode, Pi, Oh My Pi, Grok ---
+$nodeOpenCode = New-Proc 902 1 'node.exe' 'node "C:\npm\node_modules\opencode-ai\bin\opencode.js"'
+Check "detects npm opencode under node" ((Get-ToolFromProcess -Proc $nodeOpenCode) -eq 'opencode')
+Check "detects native opencode.exe" ((Get-ToolFromProcess -Proc (New-Proc 903 1 'opencode.exe' 'opencode.exe -s ses_abc')) -eq 'opencode')
+
+$bunPi = New-Proc 904 1 'bun.exe' 'bun "C:\Users\u\.bun\install\global\node_modules\@earendil-works\pi-coding-agent\dist\cli.js"'
+Check "detects npm pi under bun" ((Get-ToolFromProcess -Proc $bunPi) -eq 'pi')
+Check "detects native pi.exe" ((Get-ToolFromProcess -Proc (New-Proc 905 1 'pi.exe' 'pi.exe --session abc')) -eq 'pi')
+
+$bunOmp = New-Proc 906 1 'bun.exe' 'bun "C:\Users\u\.omp\bin\oh-my-pi\dist\cli.js"'
+Check "detects npm omp under bun" ((Get-ToolFromProcess -Proc $bunOmp) -eq 'omp')
+Check "detects native omp.exe" ((Get-ToolFromProcess -Proc (New-Proc 907 1 'omp.exe' 'omp.exe --resume abc')) -eq 'omp')
+
+$nodeGrok = New-Proc 908 1 'node.exe' 'node "C:\npm\node_modules\grok-cli\bin\grok.js"'
+Check "detects npm grok under node" ((Get-ToolFromProcess -Proc $nodeGrok) -eq 'grok')
+Check "detects native grok.exe" ((Get-ToolFromProcess -Proc (New-Proc 909 1 'grok.exe' 'grok.exe --resume abc')) -eq 'grok')
+
+Check "resume id: opencode -s <id>" ((Get-ResumeIdFromArgs -Tool 'opencode' -CommandLine 'opencode -s ses_abc') -eq 'ses_abc')
+Check "resume id: opencode --session <id>" ((Get-ResumeIdFromArgs -Tool 'opencode' -CommandLine 'opencode --session ses_abc') -eq 'ses_abc')
+Check "resume id: opencode none" ($null -eq (Get-ResumeIdFromArgs -Tool 'opencode' -CommandLine 'opencode --model gpt'))
+
+Check "resume id: pi --session <id>" ((Get-ResumeIdFromArgs -Tool 'pi' -CommandLine 'pi --session pi-sess-1') -eq 'pi-sess-1')
+Check "resume id: pi none" ($null -eq (Get-ResumeIdFromArgs -Tool 'pi' -CommandLine 'pi --verbose'))
+
+Check "resume id: omp --resume <id>" ((Get-ResumeIdFromArgs -Tool 'omp' -CommandLine 'omp --resume omp-1') -eq 'omp-1')
+Check "resume id: omp -r <id>" ((Get-ResumeIdFromArgs -Tool 'omp' -CommandLine 'omp -r omp-2') -eq 'omp-2')
+Check "resume id: omp --session <id>" ((Get-ResumeIdFromArgs -Tool 'omp' -CommandLine 'omp --session omp-3') -eq 'omp-3')
+
+Check "resume id: grok --resume <id>" ((Get-ResumeIdFromArgs -Tool 'grok' -CommandLine 'grok --resume grok-1') -eq 'grok-1')
+Check "resume id: grok -r <id>" ((Get-ResumeIdFromArgs -Tool 'grok' -CommandLine 'grok -r grok-2') -eq 'grok-2')
+Check "resume id: grok -s <id> (alt fork convention)" ((Get-ResumeIdFromArgs -Tool 'grok' -CommandLine 'grok -s grok-3') -eq 'grok-3')
+Check "resume id: grok --session <id> (alt fork convention)" ((Get-ResumeIdFromArgs -Tool 'grok' -CommandLine 'grok --session grok-4') -eq 'grok-4')
+Check "resume id: grok none" ($null -eq (Get-ResumeIdFromArgs -Tool 'grok' -CommandLine 'grok --sandbox'))
+# -s must not falsely match inside a longer flag like --sandbox
+Check "resume id: grok -s not fooled by --sandbox" ($null -eq (Get-ResumeIdFromArgs -Tool 'grok' -CommandLine 'grok --sandbox on'))
+
+$rem = Get-CliArgsRemainder -Tool 'opencode' -CommandLine 'opencode -s ses_abc --continue --debug'
+Check "cli_args: opencode session/continue flags stripped" ($rem -eq '--debug') $rem
+
+$rem = Get-CliArgsRemainder -Tool 'omp' -CommandLine 'omp --resume omp-1 --session-dir "C:\My Dir" --verbose'
+Check "cli_args: omp session flags stripped" ($rem -eq '--verbose') $rem
+
 # =============================================================================
 # PHASE 3: Claude session extraction
 # =============================================================================
@@ -224,6 +267,115 @@ Check "codex: no match yields null" ($null -eq $info.SessionId)
 
 $info = Get-CodexSessionInfo -ProcId 1 -CodexHome (Join-Path $TestRoot 'no-such-dir') -CommandLine 'codex' -Cwd 'C:\' -StartTime (Get-Date)
 Check "codex: missing codex home is graceful" ($null -eq $info.SessionId)
+
+# =============================================================================
+# PHASE 4b: OpenCode session extraction
+# =============================================================================
+Write-Host "`n--- Phase 4b: OpenCode session extraction ---" -ForegroundColor Yellow
+
+@'
+{ "session_id": "oc-sess-1", "model": "gpt-5" }
+'@ | Set-Content (Join-Path $stateDir 'opencode-600.json') -Encoding UTF8
+$info = Get-OpenCodeSessionInfo -ProcId 600 -StateDir $stateDir -CommandLine 'opencode --verbose'
+Check "opencode: state file is primary" ($info.SessionId -eq 'oc-sess-1' -and $info.Source -eq 'state-file')
+Check "opencode: model from state file" ($info.Model -eq 'gpt-5')
+
+$info = Get-OpenCodeSessionInfo -ProcId 999 -StateDir $stateDir -CommandLine 'opencode -s oc-arg-1'
+Check "opencode: args fallback when no state file" ($info.SessionId -eq 'oc-arg-1' -and $info.Source -eq 'args')
+
+'not json {{' | Set-Content (Join-Path $stateDir 'opencode-601.json') -Encoding UTF8
+$info = Get-OpenCodeSessionInfo -ProcId 601 -StateDir $stateDir -CommandLine 'opencode -s oc-fb-1'
+Check "opencode: corrupt state file falls back to args" ($info.SessionId -eq 'oc-fb-1' -and $info.Source -eq 'args')
+
+$info = Get-OpenCodeSessionInfo -ProcId 999 -StateDir $stateDir -CommandLine 'opencode'
+Check "opencode: no source yields null" ($null -eq $info.SessionId)
+
+# =============================================================================
+# PHASE 4c: Get-JsonlSessionByScore (shared by Pi and OMP) and Pi extraction
+# =============================================================================
+Write-Host "`n--- Phase 4c: JSONL scoring + Pi session extraction ---" -ForegroundColor Yellow
+
+$scoreDir = Join-Path $TestRoot 'jsonl-score'
+New-Item -ItemType Directory -Path $scoreDir -Force | Out-Null
+Check "jsonl score: missing dir yields null" ($null -eq (Get-JsonlSessionByScore -SessionsDir (Join-Path $TestRoot 'no-such') -StartTime (Get-Date)))
+Check "jsonl score: empty dir yields null" ($null -eq (Get-JsonlSessionByScore -SessionsDir $scoreDir -StartTime (Get-Date)))
+
+$fileOld = Join-Path $scoreDir 'session-old.jsonl'
+$fileNew = Join-Path $scoreDir 'session-new.jsonl'
+'{}' | Set-Content $fileOld -Encoding UTF8
+'{}' | Set-Content $fileNew -Encoding UTF8
+(Get-Item $fileOld).LastWriteTime = (Get-Date).AddHours(-2)
+(Get-Item $fileNew).LastWriteTime = (Get-Date).AddMinutes(-1)
+Check "jsonl score: most recently modified wins" ((Get-JsonlSessionByScore -SessionsDir $scoreDir -StartTime (Get-Date)) -eq 'new')
+
+Check "jsonl score: known session id always wins" ((Get-JsonlSessionByScore -SessionsDir $scoreDir -StartTime (Get-Date) -KnownSessionId 'old') -eq 'old')
+
+$piHome = Join-Path $TestRoot 'pi-home'
+$piEncodedCwd = '--' + ('C:\Work\Repos' -replace '[\\/:]', '-') + '--'
+$piSessDir = Join-Path $piHome "agent\sessions\$piEncodedCwd"
+New-Item -ItemType Directory -Path $piSessDir -Force | Out-Null
+'{}' | Set-Content (Join-Path $piSessDir 'pi-sess-x.jsonl') -Encoding UTF8
+
+$info = Get-PiSessionInfo -ProcId 700 -PiHome $piHome -CommandLine 'pi --session pi-arg-1' -Cwd 'C:\Work\Repos' -StartTime (Get-Date)
+Check "pi: args primary" ($info.SessionId -eq 'pi-arg-1' -and $info.Source -eq 'args')
+
+$info = Get-PiSessionInfo -ProcId 700 -PiHome $piHome -CommandLine 'pi' -Cwd 'C:\Work\Repos' -StartTime (Get-Date)
+Check "pi: jsonl fallback by encoded cwd dir" ($info.SessionId -eq 'pi-sess-x' -and $info.Source -eq 'jsonl')
+
+$info = Get-PiSessionInfo -ProcId 700 -PiHome $piHome -CommandLine 'pi' -Cwd 'C:\No\Such\Dir' -StartTime (Get-Date)
+Check "pi: no match for unknown cwd yields null" ($null -eq $info.SessionId)
+
+# =============================================================================
+# PHASE 4d: Oh My Pi (omp) session extraction
+# =============================================================================
+Write-Host "`n--- Phase 4d: Oh My Pi session extraction ---" -ForegroundColor Yellow
+
+$ompHome = Join-Path $TestRoot 'omp-home'
+
+$info = Get-OmpSessionInfo -ProcId 800 -OmpHome $ompHome -CommandLine 'omp --resume omp-arg-1' -Cwd 'C:\Work\Repos' -StartTime (Get-Date) -PaneId '%3'
+Check "omp: args primary" ($info.SessionId -eq 'omp-arg-1' -and $info.Source -eq 'args')
+
+$termDir = Join-Path $ompHome 'agent\terminal-sessions'
+New-Item -ItemType Directory -Path $termDir -Force | Out-Null
+$ompSessFile = Join-Path $TestRoot 'omp-sess-y.jsonl'
+'{}' | Set-Content $ompSessFile -Encoding UTF8
+@("C:\Work\Repos", $ompSessFile) | Set-Content (Join-Path $termDir 'tmux-%3') -Encoding UTF8
+
+$info = Get-OmpSessionInfo -ProcId 800 -OmpHome $ompHome -CommandLine 'omp' -Cwd 'C:\Work\Repos' -StartTime (Get-Date) -PaneId '%3'
+Check "omp: breadcrumb fallback resolves session file" ($info.SessionId -eq 'omp-sess-y' -and $info.Source -eq 'breadcrumb')
+
+$info = Get-OmpSessionInfo -ProcId 800 -OmpHome $ompHome -CommandLine 'omp' -Cwd 'C:\Work\Repos' -StartTime (Get-Date) -PaneId '%no-such-pane'
+Check "omp: missing breadcrumb falls through" ($null -eq $info.SessionId -or $info.Source -ne 'breadcrumb')
+
+$ompEncodedCwd = 'C:\Work\Elsewhere' -replace '[\\/:]', '-'
+$ompSessDir = Join-Path $ompHome "agent\sessions\$ompEncodedCwd"
+New-Item -ItemType Directory -Path $ompSessDir -Force | Out-Null
+'{}' | Set-Content (Join-Path $ompSessDir 'omp-sess-z.jsonl') -Encoding UTF8
+$info = Get-OmpSessionInfo -ProcId 800 -OmpHome $ompHome -CommandLine 'omp' -Cwd 'C:\Work\Elsewhere' -StartTime (Get-Date) -PaneId '%no-such-pane'
+Check "omp: jsonl fallback by encoded cwd dir" ($info.SessionId -eq 'omp-sess-z' -and $info.Source -eq 'jsonl')
+
+# =============================================================================
+# PHASE 4e: Grok session extraction
+# =============================================================================
+Write-Host "`n--- Phase 4e: Grok session extraction ---" -ForegroundColor Yellow
+
+$grokHome = Join-Path $TestRoot 'grok-home'
+New-Item -ItemType Directory -Path $grokHome -Force | Out-Null
+@'
+[
+  { "session_id": "grok-other", "pid": 111, "cwd": "C:\\Elsewhere" },
+  { "session_id": "grok-live-1", "pid": 850, "cwd": "C:\\Work\\Repos" }
+]
+'@ | Set-Content (Join-Path $grokHome 'active_sessions.json') -Encoding UTF8
+
+$info = Get-GrokSessionInfo -ProcId 850 -GrokHome $grokHome -CommandLine 'grok'
+Check "grok: active_sessions PID match" ($info.SessionId -eq 'grok-live-1' -and $info.Source -eq 'active-sessions')
+
+$info = Get-GrokSessionInfo -ProcId 999 -GrokHome $grokHome -CommandLine 'grok --resume grok-arg-1'
+Check "grok: args fallback" ($info.SessionId -eq 'grok-arg-1' -and $info.Source -eq 'args')
+
+$info = Get-GrokSessionInfo -ProcId 999 -GrokHome (Join-Path $TestRoot 'no-such-grok') -CommandLine 'grok'
+Check "grok: missing grok home is graceful" ($null -eq $info.SessionId)
 
 # =============================================================================
 # PHASE 5: Claude hook scripts
@@ -361,6 +513,48 @@ Check "save: env capture honors allowlist" ($claudeEntry.env.FOO -eq 'bar' -and 
 
 $codexEntry = @($doc.sessions) | Where-Object { $_.tool -eq 'codex' }
 Check "save: codex session via session-tags" ($codexEntry.session_id -eq 'codex-live-1')
+
+# --- Integration: OpenCode, Pi, OMP, Grok panes through the save script ---
+'{ "session_id": "oc-int-1", "model": "gpt-5" }' | Set-Content (Join-Path $stateDir 'opencode-1001.json') -Encoding UTF8
+@'
+[ { "session_id": "grok-int-1", "pid": 1031, "cwd": "C:\\Work\\Grok" } ]
+'@ | Set-Content (Join-Path $grokHome 'active_sessions.json') -Encoding UTF8
+
+$extProcTable = $procTable + @(
+    (New-Proc 1000 1 'powershell.exe' 'powershell.exe'),
+    (New-Proc 1001 1000 'opencode.exe' 'opencode.exe'),
+    (New-Proc 1010 1 'powershell.exe' 'powershell.exe'),
+    (New-Proc 1011 1010 'pi.exe' 'pi.exe'),
+    (New-Proc 1020 1 'powershell.exe' 'powershell.exe'),
+    (New-Proc 1021 1020 'omp.exe' 'omp.exe'),
+    (New-Proc 1030 1 'powershell.exe' 'powershell.exe'),
+    (New-Proc 1031 1030 'grok.exe' 'grok.exe')
+)
+$extPaneList = $paneList + @(
+    [PSCustomObject]@{ Target = 'oc:1.0'; PanePid = 1000; Cwd = 'C:\Work\OC'; Command = 'opencode'; PaneId = '' },
+    [PSCustomObject]@{ Target = 'piw:1.0'; PanePid = 1010; Cwd = 'C:\Work\Repos'; Command = 'pi'; PaneId = '' },
+    [PSCustomObject]@{ Target = 'ompw:1.0'; PanePid = 1020; Cwd = 'C:\Work\Elsewhere'; Command = 'omp'; PaneId = '' },
+    [PSCustomObject]@{ Target = 'grokw:1.0'; PanePid = 1030; Cwd = 'C:\Work\Grok'; Command = 'grok'; PaneId = '' }
+)
+
+& (Join-Path $ScriptsDir 'save-assistant-sessions.ps1') -ResurrectDir $resDir -StateDir $stateDir -CodexHome $codexHome `
+    -PiHome $piHome -OmpHome $ompHome -GrokHome $grokHome `
+    -PaneList $extPaneList -ProcessTable $extProcTable -PsmuxBin 'unused-not-called' -CaptureEnv '' | Out-Null
+
+$doc = Get-Content $outFile -Raw | ConvertFrom-Json
+Check "save: six sessions recorded across all tools" (@($doc.sessions).Count -eq 6) (@($doc.sessions).tool -join ',')
+
+$ocEntry = @($doc.sessions) | Where-Object { $_.tool -eq 'opencode' }
+Check "save: opencode session via state file" ($ocEntry.session_id -eq 'oc-int-1' -and $ocEntry.model -eq 'gpt-5')
+
+$piEntry = @($doc.sessions) | Where-Object { $_.tool -eq 'pi' }
+Check "save: pi session via jsonl scoring" ($piEntry.session_id -eq 'pi-sess-x')
+
+$ompEntry = @($doc.sessions) | Where-Object { $_.tool -eq 'omp' }
+Check "save: omp session via jsonl scoring" ($ompEntry.session_id -eq 'omp-sess-z')
+
+$grokEntry = @($doc.sessions) | Where-Object { $_.tool -eq 'grok' }
+Check "save: grok session via active_sessions registry" ($grokEntry.session_id -eq 'grok-int-1')
 
 # No assistants -> empty but valid file (stale data must be overwritten)
 & (Join-Path $ScriptsDir 'save-assistant-sessions.ps1') -ResurrectDir $resDir -StateDir $stateDir -CodexHome $codexHome `

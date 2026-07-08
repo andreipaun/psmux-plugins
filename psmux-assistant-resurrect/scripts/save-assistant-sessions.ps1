@@ -4,8 +4,8 @@
 # =============================================================================
 # Invoked by psmux-resurrect's @resurrect-hook-post-save-all with the save
 # file path as the (unused) first argument. Detects AI assistants (claude,
-# codex) running in psmux panes, extracts their session IDs and writes
-# assistant-sessions.json next to the resurrect saves.
+# codex, opencode, pi, omp, grok) running in psmux panes, extracts their
+# session IDs and writes assistant-sessions.json next to the resurrect saves.
 #
 # All inputs are injectable for tests; defaults hit the live system.
 # Windows PowerShell 5.1 compatible.
@@ -15,6 +15,9 @@ param(
     [string]$ResurrectDir = '',
     [string]$StateDir = '',
     [string]$CodexHome = '',
+    [string]$PiHome = '',
+    [string]$OmpHome = '',
+    [string]$GrokHome = '',
     [object[]]$PaneList = $null,
     [object[]]$ProcessTable = $null,
     [string]$PsmuxBin = '',
@@ -27,6 +30,9 @@ $ErrorActionPreference = 'Continue'
 if (-not $PsmuxBin) { $PsmuxBin = Get-PsmuxBin }
 if (-not $StateDir) { $StateDir = Get-AssistantStateDir }
 if (-not $CodexHome) { $CodexHome = Get-CodexHome }
+if (-not $PiHome) { $PiHome = Get-PiHome }
+if (-not $OmpHome) { $OmpHome = Get-OmpHome }
+if (-not $GrokHome) { $GrokHome = Get-GrokHome }
 if (-not $ResurrectDir) {
     $ResurrectDir = Join-Path $env:USERPROFILE '.psmux\resurrect'
     try {
@@ -71,6 +77,20 @@ foreach ($pane in $PaneList) {
         'codex' {
             $info = Get-CodexSessionInfo -ProcId $assistant.ProcId -CodexHome $CodexHome `
                 -CommandLine $assistant.CommandLine -Cwd $pane.Cwd -StartTime $assistant.StartTime
+        }
+        'opencode' {
+            $info = Get-OpenCodeSessionInfo -ProcId $assistant.ProcId -StateDir $StateDir -CommandLine $assistant.CommandLine
+        }
+        'pi' {
+            $info = Get-PiSessionInfo -ProcId $assistant.ProcId -PiHome $PiHome `
+                -CommandLine $assistant.CommandLine -Cwd $pane.Cwd -StartTime $assistant.StartTime
+        }
+        'omp' {
+            $info = Get-OmpSessionInfo -ProcId $assistant.ProcId -OmpHome $OmpHome `
+                -CommandLine $assistant.CommandLine -Cwd $pane.Cwd -StartTime $assistant.StartTime -PaneId $pane.PaneId
+        }
+        'grok' {
+            $info = Get-GrokSessionInfo -ProcId $assistant.ProcId -GrokHome $GrokHome -CommandLine $assistant.CommandLine
         }
     }
     if (-not $info -or -not $info.SessionId) {

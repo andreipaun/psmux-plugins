@@ -143,4 +143,36 @@ if ($installed) {
     Write-Host "assistant-resurrect: Claude Code hooks installed in $SettingsPath" -ForegroundColor Green
 }
 
-Write-Host "psmux-assistant-resurrect: loaded (tools: claude, codex)" -ForegroundColor DarkGray
+# --- Install OpenCode session-tracking plugin --------------------------------
+# Idempotent file copy - OpenCode auto-loads any .js file in its plugin
+# directory, so there is no settings file to merge (unlike Claude). Only
+# copies when the destination is missing or its content differs from ours,
+# so re-running the plugin's entry point doesn't churn the file's mtime.
+function Install-OpenCodeHook {
+    param([string]$PluginsDir = '')
+
+    if (-not $PluginsDir) { $PluginsDir = Join-Path $env:USERPROFILE '.config\opencode\plugins' }
+    $source = Join-Path $hooksDir 'opencode-session-track.js'
+    if (-not (Test-Path $source)) { return $false }
+
+    if (-not (Test-Path $PluginsDir)) {
+        New-Item -ItemType Directory -Path $PluginsDir -Force | Out-Null
+    }
+    $dest = Join-Path $PluginsDir 'opencode-session-track.js'
+
+    if (Test-Path $dest) {
+        $same = (Get-FileHash $source -Algorithm SHA256).Hash -eq (Get-FileHash $dest -Algorithm SHA256).Hash
+        if ($same) { return $false }
+    }
+    Copy-Item $source $dest -Force
+    return $true
+}
+
+if (-not $SkipPsmux) {
+    $installedOpenCode = Install-OpenCodeHook
+    if ($installedOpenCode) {
+        Write-Host "assistant-resurrect: OpenCode session-tracking plugin installed" -ForegroundColor Green
+    }
+}
+
+Write-Host "psmux-assistant-resurrect: loaded (tools: claude, codex, opencode, pi, omp, grok)" -ForegroundColor DarkGray
