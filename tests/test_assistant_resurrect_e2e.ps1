@@ -48,6 +48,7 @@ $SUFFIX = Get-Random -Minimum 1000 -Maximum 9999
 $SESS_DELIVERY = "asst-e2e-d$SUFFIX"
 $SESS_BUSY = "asst-e2e-b$SUFFIX"
 $SESS_RESTORE = "asst-e2e-r$SUFFIX"
+$SESS_FRESH = "asst-e2e-f$SUFFIX"
 
 Write-Host "`n=== psmux-assistant-resurrect e2e tests ===" -ForegroundColor Magenta
 Write-Host "Binary: $PSMUX" -ForegroundColor Cyan
@@ -154,6 +155,40 @@ if (Test-Path $restoreMarker) {
 }
 & $PSMUX set-option -gu '@resurrect-hook-post-restore-all' 2>&1 | Out-Null
 
+# Fresh-session reuse: a session whose name already exists but is untouched
+# (single window, single idle shell pane) must be restored INTO, not skipped.
+# This is the default-session-"0" flow on a fresh psmux start.
+Check "fresh scratch session created" (New-ScratchSession $SESS_FRESH)
+Start-Sleep -Seconds 2
+$freshSave = Join-Path $resDir 'psmux_resurrect_99990101_000001.json'
+@"
+{
+  "version": 2,
+  "timestamp": "99990101_000001",
+  "sessions": [
+    {
+      "name": "$SESS_FRESH",
+      "windows": [
+        {
+          "index": 1, "name": "one", "layout": "", "active": true, "zoomed": false, "flags": "",
+          "panes": [ { "index": 0, "directory": "$tmpDir", "active": true, "title": "", "command": "" } ]
+        },
+        {
+          "index": 2, "name": "two", "layout": "", "active": false, "zoomed": false, "flags": "",
+          "panes": [ { "index": 0, "directory": "$tmpDir", "active": true, "title": "", "command": "" } ]
+        }
+      ]
+    }
+  ]
+}
+"@ | Set-Content $freshSave -Encoding UTF8
+$freshSave | Set-Content (Join-Path $resDir 'last') -Encoding UTF8
+
+$restoreOut = & (Join-Path $ResurrectScripts 'restore.ps1') 6>&1 | Out-String
+Check "fresh session reused, not skipped" ($restoreOut -match 'Reusing fresh session') $restoreOut.Trim()
+$freshWins = @(((& $PSMUX list-windows -t $SESS_FRESH -F '#{window_index}' 2>&1 | Out-String).Trim() -split "`n") | Where-Object { $_.Trim() -match '^\d+$' })
+Check "windows restored into existing session" ($freshWins.Count -eq 2) "found $($freshWins.Count)"
+
 # =============================================================================
 # PHASE 2: Restore delivery into a live pane
 # =============================================================================
@@ -178,6 +213,8 @@ $delivered = Wait-ForCondition {
     $content -match [regex]::Escape("codex resume $sessId")
 }
 Check "resume command delivered to pane" $delivered
+$cdDelivered = ((& $PSMUX capture-pane -t $target -p 2>&1 | Out-String) -match 'Set-Location')
+Check "cwd restored before resume command" $cdDelivered
 
 # =============================================================================
 # PHASE 3: Skip rules
@@ -249,7 +286,7 @@ if ($env:ASSISTANT_RESURRECT_E2E_LIVE -eq '1' -and $claudeBin) {
 }
 finally {
     # Teardown: scratch sessions only, and restore touched global options.
-    foreach ($s in @($SESS_DELIVERY, $SESS_BUSY, $SESS_RESTORE)) {
+    foreach ($s in @($SESS_DELIVERY, $SESS_BUSY, $SESS_RESTORE, $SESS_FRESH)) {
         & $PSMUX kill-session -t $s 2>&1 | Out-Null
     }
     Set-OrUnset-GlobalOption '@resurrect-dir' $origResurrectDir

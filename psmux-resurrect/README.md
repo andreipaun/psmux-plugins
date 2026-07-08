@@ -70,6 +70,13 @@ set -g @resurrect-hook-post-save-all 'powershell -NoProfile -File "C:/path/to/po
 set -g @resurrect-hook-post-restore-all 'powershell -NoProfile -File "C:/path/to/post-restore.ps1"'
 ```
 
+## Restoring into an existing session
+
+If a saved session's name is already taken by a **fresh, untouched** session
+(one window, one pane, idle shell — e.g. the default session psmux creates at
+startup), the restore reuses it and rebuilds the saved windows inside it.
+Sessions that already have real content keep being skipped.
+
 ## Restore Progress Indicator
 
 During restore, the plugin writes per-session progress into the

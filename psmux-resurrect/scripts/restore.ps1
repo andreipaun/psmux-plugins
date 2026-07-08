@@ -167,14 +167,32 @@ try {
         Show-Progress -current ($si + 1) -total $totalSessions -sessionName $sessionName
 
         # Check if session already exists (idempotent)
+        $sessionExists = $false
         $null = & $PSMUX has-session -t $sessionName 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  Session '$sessionName' already exists, skipping" -ForegroundColor Yellow
-            $skipped += $sessionName
-            continue
+        if ($LASTEXITCODE -eq 0) { $sessionExists = $true }
+
+        # A session with this name is already running. If it is a fresh,
+        # untouched session - single window, single pane, idle shell - restore
+        # INTO it instead of skipping. This is the common Windows flow where
+        # psmux auto-creates session "0" at startup, which would otherwise
+        # block every restore of the default session (tmux-resurrect handles
+        # the equivalent case the same way).
+        $reuseFresh = $false
+        if ($sessionExists) {
+            $winList = @(((& $PSMUX list-windows -t $sessionName -F '#{window_index}' 2>&1 | Out-String).Trim() -split "`n") | Where-Object { $_.Trim() -match '^\d+$' })
+            $paneCmds = @(((& $PSMUX list-panes -t $sessionName -F '#{pane_current_command}' 2>&1 | Out-String).Trim() -split "`n"))
+            $shellNames = @('powershell', 'pwsh', 'cmd', 'bash', 'zsh', 'fish', 'sh', 'nu', '')
+            $paneCmd = if ($paneCmds.Count -ge 1) { ($paneCmds[0].Trim() -replace '\.exe$', '').ToLower() } else { '' }
+            if ($winList.Count -eq 1 -and $paneCmds.Count -eq 1 -and ($shellNames -contains $paneCmd)) {
+                $reuseFresh = $true
+            } else {
+                Write-Host "  Session '$sessionName' already exists, skipping" -ForegroundColor Yellow
+                $skipped += $sessionName
+                continue
+            }
         }
 
-        # Create session with first window
+        # Create session with first window (or reuse the fresh one)
         $firstWindow = $session.windows | Select-Object -First 1
         $firstDir = if ($firstWindow.panes -and $firstWindow.panes[0].directory) {
             $firstWindow.panes[0].directory
@@ -182,27 +200,38 @@ try {
             $env:USERPROFILE
         }
 
-        # Use the saved window name for the initial window
-        & $PSMUX new-session -d -s $sessionName -c $firstDir $(if ($firstWindow.name) { @('-n', $firstWindow.name) } else { @() }) 2>&1 | Out-Null
+        if ($reuseFresh) {
+            $firstWinIdx = [int]$winList[0].Trim()
+            if ($firstWindow.name) {
+                & $PSMUX rename-window -t "${sessionName}:${firstWinIdx}" $firstWindow.name 2>&1 | Out-Null
+            }
+            # The reused pane's shell is already running, so -c can't set its
+            # directory - type a cd into the idle prompt instead.
+            $qDir = $firstDir -replace "'", "''"
+            & $PSMUX send-keys -t "${sessionName}:${firstWinIdx}" "Set-Location -LiteralPath '$qDir'" Enter 2>&1 | Out-Null
+            Write-Host "  Reusing fresh session '$sessionName'" -ForegroundColor DarkGray
+        } else {
+            # Use the saved window name for the initial window
+            & $PSMUX new-session -d -s $sessionName -c $firstDir $(if ($firstWindow.name) { @('-n', $firstWindow.name) } else { @() }) 2>&1 | Out-Null
 
-        # Wait for session to be ready
-        $ready = $false
-        for ($w = 0; $w -lt 40; $w++) {
-            Start-Sleep -Milliseconds 250
-            $null = & $PSMUX has-session -t $sessionName 2>&1
-            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-        }
-        if (-not $ready) {
-            Write-Host "  Failed to create session '$sessionName'" -ForegroundColor Red
-            $failed += $sessionName
-            continue
-        }
+            # Wait for session to be ready
+            $ready = $false
+            for ($w = 0; $w -lt 40; $w++) {
+                Start-Sleep -Milliseconds 250
+                $null = & $PSMUX has-session -t $sessionName 2>&1
+                if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            }
+            if (-not $ready) {
+                Write-Host "  Failed to create session '$sessionName'" -ForegroundColor Red
+                $failed += $sessionName
+                continue
+            }
 
-        # Get the actual base index used by the new session
-        $baseIdx = (& $PSMUX show-options -t $sessionName -gv base-index 2>&1 | Out-String).Trim()
-        if ([string]::IsNullOrWhiteSpace($baseIdx) -or $baseIdx -match 'unknown') { $baseIdx = "0" }
-        $baseIdx = [int]$baseIdx
-        $firstWinIdx = $baseIdx
+            # Get the actual base index used by the new session
+            $baseIdx = (& $PSMUX show-options -t $sessionName -gv base-index 2>&1 | Out-String).Trim()
+            if ([string]::IsNullOrWhiteSpace($baseIdx) -or $baseIdx -match 'unknown') { $baseIdx = "0" }
+            $firstWinIdx = [int]$baseIdx
+        }
 
         # Helper: restore panes for a window target
         function Restore-WindowPanes {

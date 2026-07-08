@@ -154,6 +154,16 @@ foreach ($entry in @($doc.sessions)) {
         }
     }
 
+    # Restore the working directory before launching: psmux-resurrect
+    # recreates pane cwds at split time, but reused fresh sessions and shell
+    # profiles can land elsewhere - and claude resolves --resume against the
+    # current project directory, so the wrong cwd means a failed resume plus
+    # a folder-trust prompt. (Upstream prefixes cd the same way.)
+    $cwd = [string]$entry.cwd
+    if ($cwd -and (Test-Path -LiteralPath $cwd)) {
+        $cmd = "Set-Location -LiteralPath '" + ($cwd -replace "'", "''") + "'; " + $cmd
+    }
+
     # Env prefix: only validated names, values single-quoted for PowerShell.
     if ($entry.env) {
         $envPrefix = ''
