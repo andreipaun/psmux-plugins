@@ -171,6 +171,25 @@ Check "claude: corrupt state file falls back to args" ($info.SessionId -eq 'fb-1
 $info = Get-ClaudeSessionInfo -ProcId 999 -StateDir $stateDir -CommandLine 'claude'
 Check "claude: no source yields null" ($null -eq $info.SessionId)
 
+# Transcript model beats SessionStart-time model: a /model switch mid-session
+# must be reflected in what the resume passes as --model.
+$transcript = Join-Path $TestRoot 'transcript.jsonl'
+@'
+{ "type": "user", "message": { "role": "user", "content": "hi" } }
+{ "type": "assistant", "message": { "model": "claude-fable-5", "content": "hello" } }
+{ "type": "user", "message": { "role": "user", "content": "switch" } }
+{ "type": "assistant", "message": { "model": "claude-sonnet-5", "content": "switched" } }
+{ "type": "system", "content": "unrelated model mention: model" }
+'@ | Set-Content $transcript -Encoding UTF8
+$tp = $transcript.Replace('\', '\\')
+"{ `"session_id`": `"tr-sess-1`", `"model`": `"claude-fable-5`", `"transcript_path`": `"$tp`" }" | Set-Content (Join-Path $stateDir 'claude-300.json') -Encoding UTF8
+$info = Get-ClaudeSessionInfo -ProcId 300 -StateDir $stateDir -CommandLine 'claude'
+Check "claude: transcript model overrides startup model" ($info.Model -eq 'claude-sonnet-5') $info.Model
+
+"{ `"session_id`": `"tr-sess-2`", `"model`": `"claude-fable-5`", `"transcript_path`": `"C:\\no\\such\\transcript.jsonl`" }" | Set-Content (Join-Path $stateDir 'claude-301.json') -Encoding UTF8
+$info = Get-ClaudeSessionInfo -ProcId 301 -StateDir $stateDir -CommandLine 'claude'
+Check "claude: missing transcript falls back to state model" ($info.Model -eq 'claude-fable-5') $info.Model
+
 # =============================================================================
 # PHASE 4: Codex session extraction
 # =============================================================================

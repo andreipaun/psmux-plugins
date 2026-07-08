@@ -69,6 +69,7 @@ if ($null -eq $ProcessTable) { $ProcessTable = @(Get-ProcessSnapshot) }
 
 $restored = 0
 $skipped = 0
+$paneInventory = @{}
 foreach ($entry in @($doc.sessions)) {
     $target = [string]$entry.pane
     $tool = [string]$entry.tool
@@ -97,37 +98,69 @@ foreach ($entry in @($doc.sessions)) {
         continue
     }
 
-    # Locate the pane and its current state in one query.
-    $paneLine = ''
-    $raw = (& $PsmuxBin list-panes -t "${sessName}:${winIdx}" -F '#{pane_index}|#{pane_pid}|#{pane_current_command}' 2>&1) | Out-String
-    foreach ($line in ($raw -split "`n")) {
-        $line = $line.Trim()
-        if ($line -match "^$paneIdx\|") { $paneLine = $line; break }
+    # Build (once per session) an inventory of every pane: window index,
+    # pane index, pid, current command, current path.
+    if (-not $paneInventory.ContainsKey($sessName)) {
+        $inv = @()
+        $winIdxs = ((& $PsmuxBin list-windows -t $sessName -F '#{window_index}' 2>&1 | Out-String).Trim() -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' }
+        foreach ($wi in $winIdxs) {
+            $raw = (& $PsmuxBin list-panes -t "${sessName}:${wi}" -F '#{pane_index}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>&1) | Out-String
+            foreach ($line in ($raw -split "`n")) {
+                $line = $line.Trim()
+                if (-not $line -or $line -notmatch '^\d+\|') { continue }
+                $parts = $line -split '\|', 4
+                $invPid = 0
+                [void][int]::TryParse($parts[1], [ref]$invPid)
+                $inv += [PSCustomObject]@{
+                    WinIdx  = $wi
+                    PaneIdx = $parts[0]
+                    PanePid = $invPid
+                    Cmd     = (($parts[2]) -replace '\.exe$', '').ToLower()
+                    Path    = if ($parts.Count -ge 4) { $parts[3] } else { '' }
+                    Claimed = $false
+                }
+            }
+        }
+        $paneInventory[$sessName] = $inv
     }
-    if (-not $paneLine) {
-        Write-Host "assistant-resurrect: pane $target not found, skipping" -ForegroundColor Yellow
+    $inv = $paneInventory[$sessName]
+
+    # Locate the target pane by its restored working directory first - pane
+    # and window indices can shift when psmux-resurrect restores into a
+    # reused fresh session - falling back to the exact saved index.
+    $wantPath = ([string]$entry.cwd).TrimEnd('\', '/')
+    $pane = $null
+    if ($wantPath) {
+        $dirMatches = @($inv | Where-Object { -not $_.Claimed -and $_.Path.TrimEnd('\', '/') -eq $wantPath })
+        if ($dirMatches.Count -gt 0) {
+            $pane = $dirMatches | Where-Object { $_.WinIdx -eq $winIdx -and $_.PaneIdx -eq $paneIdx } | Select-Object -First 1
+            if (-not $pane) { $pane = $dirMatches[0] }
+        }
+    }
+    if (-not $pane) {
+        $pane = $inv | Where-Object { -not $_.Claimed -and $_.WinIdx -eq $winIdx -and $_.PaneIdx -eq $paneIdx } | Select-Object -First 1
+    }
+    if (-not $pane) {
+        Write-Host "assistant-resurrect: no pane found for $target (cwd $wantPath), skipping" -ForegroundColor Yellow
         $skipped++
         continue
     }
-    $paneParts = $paneLine -split '\|', 3
-    $panePid = 0
-    [void][int]::TryParse($paneParts[1], [ref]$panePid)
-    $paneCmd = ''
-    if ($paneParts.Count -ge 3) { $paneCmd = ($paneParts[2] -replace '\.exe$','').ToLower() }
+    $paneTarget = "${sessName}:$($pane.WinIdx).$($pane.PaneIdx)"
 
     # Idempotence: never launch into a pane that already runs an assistant.
-    if ($panePid -gt 0) {
-        $existing = Find-AssistantInPane -PanePid $panePid -ProcessTable $ProcessTable
+    if ($pane.PanePid -gt 0) {
+        $existing = Find-AssistantInPane -PanePid $pane.PanePid -ProcessTable $ProcessTable
         if ($existing) {
-            Write-Host "assistant-resurrect: $target already runs $($existing.Tool), skipping" -ForegroundColor DarkGray
+            Write-Host "assistant-resurrect: $paneTarget already runs $($existing.Tool), skipping" -ForegroundColor DarkGray
+            $pane.Claimed = $true
             $skipped++
             continue
         }
     }
 
     # Only type into an idle shell prompt, not into vim/less/whatever.
-    if ($paneCmd -and ($shellCommands -notcontains $paneCmd)) {
-        Write-Host "assistant-resurrect: $target is running '$paneCmd', not a shell - skipping" -ForegroundColor Yellow
+    if ($pane.Cmd -and ($shellCommands -notcontains $pane.Cmd)) {
+        Write-Host "assistant-resurrect: $paneTarget is running '$($pane.Cmd)', not a shell - skipping" -ForegroundColor Yellow
         $skipped++
         continue
     }
@@ -175,8 +208,14 @@ foreach ($entry in @($doc.sessions)) {
         if ($envPrefix) { $cmd = $envPrefix + $cmd }
     }
 
-    & $PsmuxBin send-keys -t $target $cmd Enter 2>&1 | Out-Null
-    Write-Host "assistant-resurrect: restored $tool session $sessionId in $target" -ForegroundColor Green
+    # Type the command and press Enter as two separate keystrokes: a single
+    # send-keys with trailing Enter can race a freshly-spawned shell (the
+    # text lands but the newline is swallowed, leaving the command untyped).
+    $pane.Claimed = $true
+    & $PsmuxBin send-keys -t $paneTarget $cmd 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 400
+    & $PsmuxBin send-keys -t $paneTarget Enter 2>&1 | Out-Null
+    Write-Host "assistant-resurrect: restored $tool session $sessionId in $paneTarget" -ForegroundColor Green
     $restored++
 
     # Stagger launches so simultaneous TUI startups don't fight for resources.

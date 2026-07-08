@@ -206,9 +206,13 @@ try {
                 & $PSMUX rename-window -t "${sessionName}:${firstWinIdx}" $firstWindow.name 2>&1 | Out-Null
             }
             # The reused pane's shell is already running, so -c can't set its
-            # directory - type a cd into the idle prompt instead.
+            # directory - type a cd into the idle prompt instead. Text and
+            # Enter go as separate keystrokes: a combined send-keys can race
+            # the shell and swallow the newline.
             $qDir = $firstDir -replace "'", "''"
-            & $PSMUX send-keys -t "${sessionName}:${firstWinIdx}" "Set-Location -LiteralPath '$qDir'" Enter 2>&1 | Out-Null
+            & $PSMUX send-keys -t "${sessionName}:${firstWinIdx}" "Set-Location -LiteralPath '$qDir'" 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 400
+            & $PSMUX send-keys -t "${sessionName}:${firstWinIdx}" Enter 2>&1 | Out-Null
             Write-Host "  Reusing fresh session '$sessionName'" -ForegroundColor DarkGray
         } else {
             # Use the saved window name for the initial window

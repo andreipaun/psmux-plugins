@@ -49,6 +49,7 @@ $SESS_DELIVERY = "asst-e2e-d$SUFFIX"
 $SESS_BUSY = "asst-e2e-b$SUFFIX"
 $SESS_RESTORE = "asst-e2e-r$SUFFIX"
 $SESS_FRESH = "asst-e2e-f$SUFFIX"
+$SESS_SWAP = "asst-e2e-s$SUFFIX"
 
 Write-Host "`n=== psmux-assistant-resurrect e2e tests ===" -ForegroundColor Magenta
 Write-Host "Binary: $PSMUX" -ForegroundColor Cyan
@@ -221,11 +222,12 @@ Check "cwd restored before resume command" $cdDelivered
 # =============================================================================
 Write-Host "`n--- Phase 3: Skip rules ---" -ForegroundColor Yellow
 
-# Entries pointing at dead sessions / panes are skipped without error
+# Entries pointing at dead sessions / panes are skipped without error.
+# cwd deliberately matches no pane, so directory matching can't rescue them.
 @"
 { "timestamp": "2026-01-01T00:00:00Z", "sessions": [
-  { "pane": "asst-e2e-nosuch$SUFFIX:1.0", "tool": "codex", "session_id": "x-1", "cwd": "$tmpDir", "pid": 1 },
-  { "pane": "${SESS_DELIVERY}:1.99", "tool": "codex", "session_id": "x-2", "cwd": "$tmpDir", "pid": 1 }
+  { "pane": "asst-e2e-nosuch${SUFFIX}:1.0", "tool": "codex", "session_id": "x-1", "cwd": "C:\\missing-dir-for-test", "pid": 1 },
+  { "pane": "${SESS_DELIVERY}:1.99", "tool": "codex", "session_id": "x-2", "cwd": "C:\\missing-dir-for-test", "pid": 1 }
 ] }
 "@ | Set-Content (Join-Path $resDir 'assistant-sessions.json') -Encoding UTF8
 $out = & (Join-Path $ScriptsDir 'restore-assistant-sessions.ps1') -ResurrectDir $resDir -SkipClientWait -StaggerMs 0 6>&1 | Out-String
@@ -251,6 +253,41 @@ if ($busyReady) {
     Check "non-shell pane skipped" ($out -match 'not a shell') $out.Trim()
 } else {
     Check "non-shell pane skipped" $false 'pane never showed ping as current command'
+}
+
+# Pane matching by directory: an entry whose saved pane index points at the
+# wrong pane must still land in the pane whose cwd matches (indices shift
+# when restoring into a reused fresh session).
+$dirA = Join-Path $TestRoot 'dirA'
+$dirB = Join-Path $TestRoot 'dirB'
+New-Item -ItemType Directory -Path $dirA -Force | Out-Null
+New-Item -ItemType Directory -Path $dirB -Force | Out-Null
+$env:PSMUX_ALLOW_NESTING = '1'
+& $PSMUX new-session -d -s $SESS_SWAP -c $dirA 2>&1 | Out-Null
+Wait-ForCondition { & $PSMUX has-session -t $SESS_SWAP 2>&1 | Out-Null; $LASTEXITCODE -eq 0 } | Out-Null
+& $PSMUX split-window -t $SESS_SWAP -c $dirB 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$swapPanes = @(((& $PSMUX list-panes -t $SESS_SWAP -F '#{pane_index}|#{pane_current_path}' 2>&1 | Out-String).Trim() -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$paneA = ($swapPanes | Where-Object { $_ -like "*$(Split-Path $dirA -Leaf)" } | Select-Object -First 1)
+$paneB = ($swapPanes | Where-Object { $_ -like "*$(Split-Path $dirB -Leaf)" } | Select-Object -First 1)
+Check "swap: two panes with distinct dirs" ([bool]$paneA -and [bool]$paneB) ($swapPanes -join ' ; ')
+if ($paneA -and $paneB) {
+    $idxA = $paneA.Split('|')[0]
+    $idxB = $paneB.Split('|')[0]
+    $winIdx = ((& $PSMUX list-windows -t $SESS_SWAP -F '#{window_index}' 2>&1 | Out-String).Trim() -split "`n")[0].Trim()
+    $dirBJson = $dirB.Replace('\', '\\')
+    # entry deliberately claims pane A's index while its cwd is pane B's dir
+    @"
+{ "timestamp": "2026-01-01T00:00:00Z", "sessions": [
+  { "pane": "${SESS_SWAP}:${winIdx}.${idxA}", "tool": "codex", "session_id": "swap-$SUFFIX", "cwd": "$dirBJson", "pid": 1 }
+] }
+"@ | Set-Content (Join-Path $resDir 'assistant-sessions.json') -Encoding UTF8
+    # Assert on the restore log's pane target: capture-pane in current psmux
+    # builds returns the same content for every pane index of a window, so
+    # it cannot distinguish which pane received the keys.
+    $swapOut = & (Join-Path $ScriptsDir 'restore-assistant-sessions.ps1') -ResurrectDir $resDir -SkipClientWait -StaggerMs 0 6>&1 | Out-String
+    Check "swap: command sent to dir-matching pane" ($swapOut -match [regex]::Escape("in ${SESS_SWAP}:${winIdx}.${idxB}")) $swapOut.Trim()
+    Check "swap: index-named pane not targeted" ($swapOut -notmatch [regex]::Escape("in ${SESS_SWAP}:${winIdx}.${idxA}"))
 }
 
 # =============================================================================

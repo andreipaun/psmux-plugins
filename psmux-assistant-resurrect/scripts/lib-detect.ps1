@@ -216,6 +216,36 @@ function Get-CliArgsRemainder {
     return ($kept -join ' ')
 }
 
+# Model of the last assistant message in a Claude Code transcript - the model
+# actually in use, unlike the SessionStart-time model in the hook state file.
+# Reads only the tail of the file (transcripts grow to megabytes).
+function Get-ClaudeTranscriptModel {
+    param([string]$TranscriptPath)
+
+    if (-not $TranscriptPath -or -not (Test-Path -LiteralPath $TranscriptPath)) { return $null }
+    try {
+        $fs = [System.IO.File]::Open($TranscriptPath, 'Open', 'Read', 'ReadWrite')
+        try {
+            $take = [Math]::Min(262144, $fs.Length)
+            if ($take -le 0) { return $null }
+            $fs.Seek(-$take, [System.IO.SeekOrigin]::End) | Out-Null
+            $buf = New-Object byte[] $take
+            [void]$fs.Read($buf, 0, $take)
+        } finally { $fs.Close() }
+        $tail = [System.Text.Encoding]::UTF8.GetString($buf)
+        $lines = $tail -split "`n"
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            $ln = $lines[$i].Trim()
+            if (-not $ln -or $ln -notmatch '"model"') { continue }
+            try {
+                $obj = $ln | ConvertFrom-Json -ErrorAction Stop
+                if ($obj.message -and $obj.message.model) { return [string]$obj.message.model }
+            } catch { }  # first line of the tail window may be truncated
+        }
+    } catch { }
+    return $null
+}
+
 # --- Claude session info -----------------------------------------------------
 # Primary: state file written by the SessionStart hook (claude-<pid>.json).
 # Fallback: --resume id parsed from the live command line.
@@ -233,6 +263,13 @@ function Get-ClaudeSessionInfo {
                 $info.Source = 'state-file'
                 if ($state.model) { $info.Model = [string]$state.model }
                 if ($state.env) { $info.Env = $state.env }
+
+                # The state file's model is the model at SessionStart - a
+                # mid-session /model switch would be lost and the resume
+                # would force a stale model. Prefer the model of the last
+                # assistant message in the session transcript.
+                $transcriptModel = Get-ClaudeTranscriptModel -TranscriptPath ([string]$state.transcript_path)
+                if ($transcriptModel) { $info.Model = $transcriptModel }
             }
         } catch { }
     }
