@@ -70,6 +70,28 @@ set -g @resurrect-hook-post-save-all 'powershell -NoProfile -File "C:/path/to/po
 set -g @resurrect-hook-post-restore-all 'powershell -NoProfile -File "C:/path/to/post-restore.ps1"'
 ```
 
+## Known Windows limitation: idle PowerShell pane directories
+
+PowerShell's `Set-Location`/`cd` changes only PowerShell's internal location,
+not the **process** working directory - and `#{pane_current_path}` (what the
+save records) reads the process cwd. Panes running a child process (claude,
+node, ...) save correctly because the child is spawned at the shell's
+location, but an **idle PowerShell pane** saves the directory the shell was
+*started* in, not where you navigated to.
+
+Fix: sync the process cwd from your prompt. Add to your PowerShell profile
+(`$PROFILE`, e.g. `Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`):
+
+```powershell
+$global:__prevPrompt = $function:prompt
+function prompt {
+    if ($PWD.Provider.Name -eq 'FileSystem') {
+        [Environment]::CurrentDirectory = $PWD.ProviderPath
+    }
+    if ($global:__prevPrompt) { & $global:__prevPrompt } else { "PS $($PWD.Path)> " }
+}
+```
+
 ## Restoring into an existing session
 
 If a saved session's name is already taken by a **fresh, untouched** session
